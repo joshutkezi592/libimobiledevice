@@ -123,7 +123,7 @@ class CommandRunner:
             "idevice_id", "ideviceinfo", "idevicepair", "idevicename",
             "idevicebackup2", "idevicescreenshot", "idevicesyslog",
             "idevicediagnostics", "idevicecrashreport", "ideviceinstaller",
-            "afcclient"
+            "ideviceimagemounter", "afcclient"
         ]
         return {tool: CommandRunner.check_tool_available(tool) for tool in tools}
     
@@ -391,8 +391,9 @@ class CommandRunner:
             logging.warning("ideviceinstaller not available - cannot list apps")
             return apps
         
+        # Use the new 'list' command syntax (ideviceinstaller changed from -l to list)
         ret, stdout, stderr = CommandRunner.run_command(
-            ["ideviceinstaller", "-u", udid, "-l"],
+            ["ideviceinstaller", "-u", udid, "list"],
             timeout=60
         )
         
@@ -553,6 +554,47 @@ class CommandRunner:
         if ret == 0:
             return True, "Device shutdown initiated"
         return False, stderr or "Failed to shutdown device"
+    
+    @staticmethod
+    def check_developer_image_mounted(udid: str) -> Tuple[bool, str]:
+        """Check if developer disk image is mounted"""
+        if not CommandRunner.check_tool_available("ideviceimagemounter"):
+            return False, "ideviceimagemounter not available"
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["ideviceimagemounter", "-u", udid, "-l"]
+        )
+        
+        # If there's an image mounted, it will show "ImageSignature" in output
+        output = (stdout or "") + (stderr or "")
+        if "ImageSignature" in output or "Developer" in output:
+            return True, "Developer image is mounted"
+        
+        return False, "No developer image mounted"
+    
+    @staticmethod
+    def mount_developer_image(udid: str, image_path: str, 
+                              signature_path: str = None) -> Tuple[bool, str]:
+        """Mount developer disk image"""
+        if not CommandRunner.check_tool_available("ideviceimagemounter"):
+            return False, "ideviceimagemounter not available"
+        
+        if not os.path.exists(image_path):
+            return False, f"Image file not found: {image_path}"
+        
+        cmd = ["ideviceimagemounter", "-u", udid, image_path]
+        
+        # Add signature if provided
+        if signature_path and os.path.exists(signature_path):
+            cmd.append(signature_path)
+        
+        ret, stdout, stderr = CommandRunner.run_command(cmd, timeout=60)
+        
+        output = ((stdout or "") + (stderr or "")).lower()
+        if ret == 0 or "complete" in output or "success" in output:
+            return True, "Developer image mounted successfully"
+        
+        return False, stderr or stdout or "Failed to mount developer image"
 
 
 class DeviceMonitorThread(QThread):
@@ -1289,6 +1331,11 @@ class ForensicImagerWindow(QMainWindow):
         screenshot_action.triggered.connect(self.capture_screenshot)
         toolbar.addAction(screenshot_action)
         
+        # Mount developer image action
+        mount_action = QAction("Mount Dev Image", self)
+        mount_action.triggered.connect(self.mount_developer_image)
+        toolbar.addAction(mount_action)
+        
         backup_action = QAction("Start Backup", self)
         backup_action.triggered.connect(self.start_backup)
         toolbar.addAction(backup_action)
@@ -1325,6 +1372,23 @@ class ForensicImagerWindow(QMainWindow):
         """Manually refresh device list"""
         self.statusBar().showMessage("Scanning for devices...")
         devices = CommandRunner.get_device_list()
+        
+        # Enrich device info with battery and pairing status
+        for device in devices:
+            # Get battery info
+            battery = CommandRunner.get_battery_info(device.udid)
+            if 'BatteryCurrentCapacity' in battery:
+                try:
+                    device.battery_level = int(battery['BatteryCurrentCapacity'])
+                except ValueError as e:
+                    logging.debug(f"Could not parse battery level: {e}")
+            if 'BatteryIsCharging' in battery:
+                device.battery_charging = battery['BatteryIsCharging'].lower() == 'true'
+            
+            # Check pairing status
+            paired, _ = CommandRunner.check_pairing_status(device.udid)
+            device.is_paired = paired
+        
         self.on_devices_changed(devices)
     
     def on_devices_changed(self, devices: List[DeviceInfo]):
@@ -1933,6 +1997,86 @@ class ForensicImagerWindow(QMainWindow):
         else:
             self.log_message(f"Failed to restart device: {message}")
             QMessageBox.warning(self, "Error", f"Failed to restart device:\n{message}")
+    
+    def mount_developer_image(self):
+        """Mount developer disk image on device"""
+        if not self.current_device:
+            QMessageBox.warning(self, "Error", "No device selected")
+            return
+        
+        # First check if already mounted
+        mounted, msg = CommandRunner.check_developer_image_mounted(self.current_device.udid)
+        if mounted:
+            QMessageBox.information(
+                self, 
+                "Already Mounted",
+                "Developer disk image is already mounted on this device."
+            )
+            return
+        
+        # Ask user to select the DeveloperDiskImage.dmg file
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Developer Disk Image",
+            os.path.expanduser("~"),
+            "Disk Images (*.dmg);;All Files (*)"
+        )
+        
+        if not image_path:
+            return
+        
+        # Look for signature file in same directory
+        base_path = os.path.splitext(image_path)[0]
+        possible_sig_paths = [
+            base_path + ".signature",
+            image_path + ".signature",
+        ]
+        
+        signature_path = None
+        for sig_path in possible_sig_paths:
+            if os.path.exists(sig_path):
+                signature_path = sig_path
+                break
+        
+        if not signature_path:
+            # Ask user to select signature file
+            signature_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Signature File (optional)",
+                os.path.dirname(image_path),
+                "Signature Files (*.signature);;All Files (*)"
+            )
+        
+        self.statusBar().showMessage("Mounting developer disk image...")
+        self.log_message(f"Mounting developer image: {image_path}")
+        
+        success, message = CommandRunner.mount_developer_image(
+            self.current_device.udid,
+            image_path,
+            signature_path
+        )
+        
+        if success:
+            self.log_message("Developer disk image mounted successfully")
+            self.statusBar().showMessage("Developer image mounted")
+            QMessageBox.information(
+                self, 
+                "Success", 
+                "Developer disk image mounted successfully.\n\n"
+                "Screenshot functionality should now work."
+            )
+        else:
+            self.log_message(f"Failed to mount developer image: {message}")
+            self.statusBar().showMessage("Failed to mount developer image")
+            QMessageBox.warning(
+                self, 
+                "Error", 
+                f"Failed to mount developer disk image:\n\n{message}\n\n"
+                "Make sure the image matches your iOS version.\n"
+                "Developer disk images can be found in Xcode at:\n"
+                "/Applications/Xcode.app/Contents/Developer/Platforms/"
+                "iPhoneOS.platform/DeviceSupport/"
+            )
     
     def show_tools_status(self):
         """Show libimobiledevice tools status dialog"""
