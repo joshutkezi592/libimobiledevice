@@ -13,9 +13,12 @@ import subprocess
 import json
 import threading
 import hashlib
+import logging
+import re
+import uuid as uuid_lib
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
 import shutil
@@ -26,10 +29,17 @@ from PyQt6.QtWidgets import (
     QTabWidget, QSplitter, QFileDialog, QProgressBar, QMessageBox,
     QStatusBar, QToolBar, QGroupBox, QFormLayout, QLineEdit,
     QComboBox, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMenu, QDialog, QDialogButtonBox, QPlainTextEdit
+    QMenu, QDialog, QDialogButtonBox, QPlainTextEdit, QFrame,
+    QSpinBox, QListWidget, QListWidgetItem, QInputDialog, QStyle
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QImage
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QDateTime
+from PyQt6.QtGui import QAction, QIcon, QFont, QColor, QPixmap, QImage, QPalette
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 
 @dataclass
@@ -42,6 +52,10 @@ class DeviceInfo:
     serial_number: str = ""
     connection_type: str = "USB"
     all_info: Dict[str, Any] = None
+    battery_level: int = -1
+    battery_charging: bool = False
+    is_paired: bool = False
+    disk_usage: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass  
@@ -55,12 +69,60 @@ class FileInfo:
     file_type: str = ""
 
 
+# Case subdirectories for organized evidence storage
+CASE_SUBDIRS = ["backups", "files", "screenshots", "crash_reports", "reports", "logs"]
+
+
+@dataclass
+class ForensicCase:
+    """Forensic case information"""
+    case_id: str
+    case_name: str
+    examiner: str
+    created_at: str
+    notes: str = ""
+    device_udid: str = ""
+    output_directory: str = ""
+    
+    @staticmethod
+    def generate_case_id() -> str:
+        """Generate a unique case ID"""
+        return f"CASE-{datetime.now().strftime('%Y%m%d')}-{str(uuid_lib.uuid4())[:8].upper()}"
+
+
 class CommandRunner:
     """Helper class to run libimobiledevice command-line tools"""
+    
+    # Cache for tool availability
+    _tool_cache: Dict[str, bool] = {}
+    
+    @staticmethod
+    def check_tool_available(tool_name: str) -> bool:
+        """Check if a libimobiledevice tool is available"""
+        if tool_name in CommandRunner._tool_cache:
+            return CommandRunner._tool_cache[tool_name]
+        
+        # Use shutil.which for cross-platform compatibility
+        available = shutil.which(tool_name) is not None
+        
+        CommandRunner._tool_cache[tool_name] = available
+        return available
+    
+    @staticmethod
+    def get_available_tools() -> Dict[str, bool]:
+        """Get dictionary of available libimobiledevice tools"""
+        tools = [
+            "idevice_id", "ideviceinfo", "idevicepair", "idevicename",
+            "idevicebackup2", "idevicescreenshot", "idevicesyslog",
+            "idevicediagnostics", "idevicecrashreport", "ideviceinstaller",
+            "afcclient"
+        ]
+        return {tool: CommandRunner.check_tool_available(tool) for tool in tools}
     
     @staticmethod
     def run_command(cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
         """Run a command and return (return_code, stdout, stderr)"""
+        logging.debug(f"Running command: {' '.join(cmd)}")
         try:
             result = subprocess.run(
                 cmd,
@@ -68,12 +130,16 @@ class CommandRunner:
                 text=True,
                 timeout=timeout
             )
+            logging.debug(f"Command returned: {result.returncode}")
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
+            logging.warning(f"Command timed out: {' '.join(cmd)}")
             return -1, "", "Command timed out"
         except FileNotFoundError:
+            logging.error(f"Command not found: {cmd[0]}")
             return -1, "", f"Command not found: {cmd[0]}"
         except Exception as e:
+            logging.error(f"Command error: {e}")
             return -1, "", str(e)
     
     @staticmethod
@@ -254,6 +320,183 @@ class CommandRunner:
         if ret == 0:
             return True, output_path
         return False, stderr or "Failed to take screenshot"
+    
+    @staticmethod
+    def check_pairing_status(udid: str) -> Tuple[bool, str]:
+        """Check if device is paired"""
+        if not CommandRunner.check_tool_available("idevicepair"):
+            return False, "idevicepair not available"
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["idevicepair", "-u", udid, "validate"]
+        )
+        
+        if ret == 0:
+            return True, "Device is paired"
+        return False, stderr or stdout or "Device is not paired"
+    
+    @staticmethod
+    def pair_device(udid: str) -> Tuple[bool, str]:
+        """Pair with device"""
+        if not CommandRunner.check_tool_available("idevicepair"):
+            return False, "idevicepair not available"
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["idevicepair", "-u", udid, "pair"]
+        )
+        
+        if ret == 0:
+            return True, "Device paired successfully"
+        return False, stderr or stdout or "Failed to pair device"
+    
+    @staticmethod
+    def get_battery_info(udid: str) -> Dict[str, Any]:
+        """Get device battery information"""
+        battery_info = {}
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["ideviceinfo", "-u", udid, "-q", "com.apple.mobile.battery"]
+        )
+        
+        if ret == 0:
+            for line in stdout.split('\n'):
+                if ':' in line:
+                    key, _, value = line.partition(':')
+                    battery_info[key.strip()] = value.strip()
+        
+        return battery_info
+    
+    @staticmethod
+    def get_installed_apps(udid: str) -> List[Dict[str, str]]:
+        """Get list of installed apps"""
+        apps = []
+        
+        if not CommandRunner.check_tool_available("ideviceinstaller"):
+            logging.warning("ideviceinstaller not available - cannot list apps")
+            return apps
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["ideviceinstaller", "-u", udid, "-l"],
+            timeout=60
+        )
+        
+        if ret == 0:
+            for line in stdout.split('\n'):
+                line = line.strip()
+                if not line or line.startswith('CFBundleIdentifier') or line.startswith('Total:'):
+                    continue
+                
+                # Parse app info: bundle_id, version, name
+                parts = line.split(',')
+                if len(parts) >= 1:
+                    bundle_id = parts[0].strip()
+                    version = parts[1].strip() if len(parts) > 1 else ""
+                    name = parts[2].strip().strip('"') if len(parts) > 2 else bundle_id
+                    
+                    apps.append({
+                        'bundle_id': bundle_id,
+                        'version': version,
+                        'name': name
+                    })
+        
+        return apps
+    
+    @staticmethod
+    def get_crash_reports(udid: str, output_dir: str, 
+                          callback=None) -> Tuple[bool, str]:
+        """Download crash reports from device"""
+        if not CommandRunner.check_tool_available("idevicecrashreport"):
+            return False, "idevicecrashreport not available"
+        
+        cmd = ["idevicecrashreport", "-u", udid, "-e", output_dir]
+        
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            
+            output_lines = []
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    output_lines.append(line.strip())
+                    if callback:
+                        callback(line.strip())
+            
+            ret = process.wait()
+            
+            if ret == 0:
+                return True, f"Crash reports saved to {output_dir}"
+            return False, '\n'.join(output_lines) or "Failed to get crash reports"
+            
+        except Exception as e:
+            return False, str(e)
+    
+    @staticmethod
+    def get_syslog(udid: str, callback=None, stop_event=None) -> None:
+        """Stream system log from device"""
+        if not CommandRunner.check_tool_available("idevicesyslog"):
+            if callback:
+                callback("idevicesyslog not available")
+            return
+        
+        cmd = ["idevicesyslog", "-u", udid]
+        
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            
+            while True:
+                if stop_event and stop_event.is_set():
+                    process.terminate()
+                    break
+                
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line and callback:
+                    callback(line.strip())
+                    
+        except Exception as e:
+            if callback:
+                callback(f"Error: {e}")
+    
+    @staticmethod
+    def restart_device(udid: str) -> Tuple[bool, str]:
+        """Restart the device"""
+        if not CommandRunner.check_tool_available("idevicediagnostics"):
+            return False, "idevicediagnostics not available"
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["idevicediagnostics", "-u", udid, "restart"]
+        )
+        
+        if ret == 0:
+            return True, "Device restart initiated"
+        return False, stderr or "Failed to restart device"
+    
+    @staticmethod  
+    def shutdown_device(udid: str) -> Tuple[bool, str]:
+        """Shutdown the device"""
+        if not CommandRunner.check_tool_available("idevicediagnostics"):
+            return False, "idevicediagnostics not available"
+        
+        ret, stdout, stderr = CommandRunner.run_command(
+            ["idevicediagnostics", "-u", udid, "shutdown"]
+        )
+        
+        if ret == 0:
+            return True, "Device shutdown initiated"
+        return False, stderr or "Failed to shutdown device"
 
 
 class DeviceMonitorThread(QThread):
@@ -269,6 +512,22 @@ class DeviceMonitorThread(QThread):
         while self.running:
             devices = CommandRunner.get_device_list()
             
+            # Enrich device info with battery and pairing status
+            for device in devices:
+                # Get battery info
+                battery = CommandRunner.get_battery_info(device.udid)
+                if 'BatteryCurrentCapacity' in battery:
+                    try:
+                        device.battery_level = int(battery['BatteryCurrentCapacity'])
+                    except ValueError as e:
+                        logging.debug(f"Could not parse battery level: {e}")
+                if 'BatteryIsCharging' in battery:
+                    device.battery_charging = battery['BatteryIsCharging'].lower() == 'true'
+                
+                # Check pairing status
+                paired, _ = CommandRunner.check_pairing_status(device.udid)
+                device.is_paired = paired
+            
             # Check if device list changed
             current_udids = set(d.udid for d in devices)
             last_udids = set(d.udid for d in self.last_devices)
@@ -281,6 +540,45 @@ class DeviceMonitorThread(QThread):
     
     def stop(self):
         self.running = False
+
+
+class SyslogThread(QThread):
+    """Thread for streaming system log"""
+    new_line = pyqtSignal(str)
+    
+    def __init__(self, udid: str):
+        super().__init__()
+        self.udid = udid
+        self.stop_event = threading.Event()
+    
+    def run(self):
+        CommandRunner.get_syslog(
+            self.udid,
+            callback=lambda line: self.new_line.emit(line),
+            stop_event=self.stop_event
+        )
+    
+    def stop(self):
+        self.stop_event.set()
+
+
+class CrashReportThread(QThread):
+    """Thread for downloading crash reports"""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    
+    def __init__(self, udid: str, output_dir: str):
+        super().__init__()
+        self.udid = udid
+        self.output_dir = output_dir
+    
+    def run(self):
+        success, message = CommandRunner.get_crash_reports(
+            self.udid,
+            self.output_dir,
+            callback=lambda msg: self.progress.emit(msg)
+        )
+        self.finished.emit(success, message)
 
 
 class BackupThread(QThread):
@@ -412,6 +710,176 @@ class DeviceInfoDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class CaseManagementDialog(QDialog):
+    """Dialog for managing forensic cases"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.case: Optional[ForensicCase] = None
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setWindowTitle("New Forensic Case")
+        self.setMinimumSize(500, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Case details
+        form_group = QGroupBox("Case Details")
+        form_layout = QFormLayout()
+        
+        self.case_id_edit = QLineEdit()
+        self.case_id_edit.setText(ForensicCase.generate_case_id())
+        form_layout.addRow("Case ID:", self.case_id_edit)
+        
+        self.case_name_edit = QLineEdit()
+        self.case_name_edit.setPlaceholderText("Enter case name")
+        form_layout.addRow("Case Name:", self.case_name_edit)
+        
+        self.examiner_edit = QLineEdit()
+        self.examiner_edit.setPlaceholderText("Examiner name")
+        form_layout.addRow("Examiner:", self.examiner_edit)
+        
+        # Output directory
+        dir_layout = QHBoxLayout()
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("Select output directory")
+        dir_layout.addWidget(self.output_dir_edit)
+        
+        browse_btn = QPushButton("Browse")
+        browse_btn.clicked.connect(self.browse_output_dir)
+        dir_layout.addWidget(browse_btn)
+        
+        form_layout.addRow("Output Directory:", dir_layout)
+        
+        form_group.setLayout(form_layout)
+        layout.addWidget(form_group)
+        
+        # Notes
+        notes_group = QGroupBox("Case Notes")
+        notes_layout = QVBoxLayout()
+        
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setPlaceholderText("Enter any case notes...")
+        notes_layout.addWidget(self.notes_edit)
+        
+        notes_group.setLayout(notes_layout)
+        layout.addWidget(notes_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.create_case)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def browse_output_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", os.path.expanduser("~")
+        )
+        if dir_path:
+            self.output_dir_edit.setText(dir_path)
+    
+    def create_case(self):
+        if not self.case_name_edit.text().strip():
+            QMessageBox.warning(self, "Error", "Please enter a case name")
+            return
+        
+        if not self.examiner_edit.text().strip():
+            QMessageBox.warning(self, "Error", "Please enter examiner name")
+            return
+        
+        if not self.output_dir_edit.text().strip():
+            QMessageBox.warning(self, "Error", "Please select output directory")
+            return
+        
+        self.case = ForensicCase(
+            case_id=self.case_id_edit.text(),
+            case_name=self.case_name_edit.text(),
+            examiner=self.examiner_edit.text(),
+            created_at=datetime.now().isoformat(),
+            notes=self.notes_edit.toPlainText(),
+            output_directory=self.output_dir_edit.text()
+        )
+        
+        # Create case directory structure
+        case_dir = os.path.join(self.case.output_directory, self.case.case_id)
+        os.makedirs(case_dir, exist_ok=True)
+        
+        # Create subdirectories using the constant
+        for subdir in CASE_SUBDIRS:
+            os.makedirs(os.path.join(case_dir, subdir), exist_ok=True)
+        
+        # Save case info
+        case_info_path = os.path.join(case_dir, "case_info.json")
+        with open(case_info_path, 'w') as f:
+            json.dump({
+                'case_id': self.case.case_id,
+                'case_name': self.case.case_name,
+                'examiner': self.case.examiner,
+                'created_at': self.case.created_at,
+                'notes': self.case.notes
+            }, f, indent=2)
+        
+        self.accept()
+
+
+class ToolsStatusDialog(QDialog):
+    """Dialog showing available libimobiledevice tools"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setWindowTitle("libimobiledevice Tools Status")
+        self.setMinimumSize(400, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel(
+            "The following libimobiledevice tools are required for full functionality:"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Tools table
+        self.tools_table = QTableWidget()
+        self.tools_table.setColumnCount(2)
+        self.tools_table.setHorizontalHeaderLabels(["Tool", "Status"])
+        self.tools_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tools_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        
+        tools = CommandRunner.get_available_tools()
+        self.tools_table.setRowCount(len(tools))
+        
+        for i, (tool, available) in enumerate(sorted(tools.items())):
+            self.tools_table.setItem(i, 0, QTableWidgetItem(tool))
+            status_item = QTableWidgetItem("✓ Available" if available else "✗ Not Found")
+            status_item.setForeground(QColor("green") if available else QColor("red"))
+            self.tools_table.setItem(i, 1, status_item)
+        
+        layout.addWidget(self.tools_table)
+        
+        # Install instructions
+        install_label = QLabel(
+            "<b>Installation:</b><br>"
+            "<b>Debian/Ubuntu:</b> <code>sudo apt install libimobiledevice-utils</code><br>"
+            "<b>Fedora/RHEL:</b> <code>sudo dnf install libimobiledevice-utils</code><br>"
+            "<b>macOS:</b> <code>brew install libimobiledevice</code><br>"
+            "<b>From source:</b> Build from this repository using ./autogen.sh && make"
+        )
+        install_label.setWordWrap(True)
+        layout.addWidget(install_label)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class ExportReportDialog(QDialog):
     """Dialog to export forensic report"""
     
@@ -511,6 +979,8 @@ class ForensicImagerWindow(QMainWindow):
         self.current_device: Optional[DeviceInfo] = None
         self.devices: List[DeviceInfo] = []
         self.acquired_files: List[Dict] = []
+        self.current_case: Optional[ForensicCase] = None
+        self.syslog_thread: Optional[SyslogThread] = None
         
         self.setup_ui()
         self.setup_device_monitor()
@@ -545,6 +1015,11 @@ class ForensicImagerWindow(QMainWindow):
         self.device_combo = QComboBox()
         self.device_combo.currentIndexChanged.connect(self.on_device_selected)
         device_layout.addWidget(self.device_combo)
+        
+        # Battery status
+        self.battery_label = QLabel("")
+        self.battery_label.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
+        device_layout.addWidget(self.battery_label)
         
         device_btn_layout = QHBoxLayout()
         self.refresh_btn = QPushButton("Refresh")
@@ -611,6 +1086,28 @@ class ForensicImagerWindow(QMainWindow):
         info_layout.addWidget(self.info_table)
         
         right_panel.addTab(info_tab, "Device Info")
+        
+        # Apps Tab
+        apps_tab = QWidget()
+        apps_layout = QVBoxLayout(apps_tab)
+        
+        apps_btn_layout = QHBoxLayout()
+        self.refresh_apps_btn = QPushButton("Refresh Apps")
+        self.refresh_apps_btn.clicked.connect(self.refresh_apps)
+        self.refresh_apps_btn.setEnabled(False)
+        apps_btn_layout.addWidget(self.refresh_apps_btn)
+        apps_btn_layout.addStretch()
+        apps_layout.addLayout(apps_btn_layout)
+        
+        self.apps_table = QTableWidget()
+        self.apps_table.setColumnCount(3)
+        self.apps_table.setHorizontalHeaderLabels(["Name", "Bundle ID", "Version"])
+        self.apps_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.apps_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.apps_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        apps_layout.addWidget(self.apps_table)
+        
+        right_panel.addTab(apps_tab, "Installed Apps")
         
         # Backup Tab
         backup_tab = QWidget()
@@ -709,12 +1206,25 @@ class ForensicImagerWindow(QMainWindow):
     def create_toolbar(self):
         toolbar = QToolBar()
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
+        
+        # Case management
+        new_case_action = QAction("New Case", self)
+        new_case_action.triggered.connect(self.new_case)
+        toolbar.addAction(new_case_action)
+        
+        toolbar.addSeparator()
         
         # Refresh action
         refresh_action = QAction("Refresh Devices", self)
         refresh_action.triggered.connect(self.refresh_devices)
         toolbar.addAction(refresh_action)
+        
+        # Pair action
+        pair_action = QAction("Pair Device", self)
+        pair_action.triggered.connect(self.pair_device)
+        toolbar.addAction(pair_action)
         
         toolbar.addSeparator()
         
@@ -727,7 +1237,23 @@ class ForensicImagerWindow(QMainWindow):
         backup_action.triggered.connect(self.start_backup)
         toolbar.addAction(backup_action)
         
+        crash_action = QAction("Get Crash Reports", self)
+        crash_action.triggered.connect(self.get_crash_reports)
+        toolbar.addAction(crash_action)
+        
         toolbar.addSeparator()
+        
+        # Device controls
+        restart_action = QAction("Restart Device", self)
+        restart_action.triggered.connect(self.restart_device)
+        toolbar.addAction(restart_action)
+        
+        toolbar.addSeparator()
+        
+        # Tools status
+        tools_action = QAction("Check Tools", self)
+        tools_action.triggered.connect(self.show_tools_status)
+        toolbar.addAction(tools_action)
         
         # Help
         about_action = QAction("About", self)
@@ -788,14 +1314,52 @@ class ForensicImagerWindow(QMainWindow):
         self.device_info_btn.setEnabled(has_device)
         self.backup_btn.setEnabled(has_device and bool(self.backup_dest.text()))
         self.screenshot_btn.setEnabled(has_device)
+        self.refresh_apps_btn.setEnabled(has_device)
         
         if has_device:
             self.update_device_info()
+            self.update_battery_display()
             self.load_directory("/")
             self.log_message(f"Selected device: {device.name} ({device.udid})")
         else:
             self.info_table.setRowCount(0)
+            self.apps_table.setRowCount(0)
             self.file_tree.clear()
+            self.battery_label.setText("")
+    
+    def update_battery_display(self):
+        """Update battery status display"""
+        if not self.current_device:
+            self.battery_label.setText("")
+            return
+        
+        battery_text = ""
+        if self.current_device.battery_level >= 0:
+            charging = "⚡" if self.current_device.battery_charging else ""
+            battery_text = f"🔋 {self.current_device.battery_level}% {charging}"
+        
+        paired_text = "✓ Paired" if self.current_device.is_paired else "✗ Not Paired"
+        
+        self.battery_label.setText(f"{battery_text}  |  {paired_text}")
+    
+    def refresh_apps(self):
+        """Refresh installed apps list"""
+        if not self.current_device:
+            return
+        
+        self.statusBar().showMessage("Loading installed apps...")
+        self.apps_table.setRowCount(0)
+        
+        apps = CommandRunner.get_installed_apps(self.current_device.udid)
+        
+        self.apps_table.setRowCount(len(apps))
+        for i, app in enumerate(apps):
+            self.apps_table.setItem(i, 0, QTableWidgetItem(app.get('name', '')))
+            self.apps_table.setItem(i, 1, QTableWidgetItem(app.get('bundle_id', '')))
+            self.apps_table.setItem(i, 2, QTableWidgetItem(app.get('version', '')))
+        
+        self.statusBar().showMessage(f"Found {len(apps)} installed apps")
+        self.log_message(f"Found {len(apps)} installed apps")
     
     def update_device_info(self):
         """Update device info table"""
@@ -1176,10 +1740,126 @@ class ForensicImagerWindow(QMainWindow):
             "<li>Full device backup (forensic imaging)</li>"
             "<li>Screenshot capture</li>"
             "<li>Hash calculation (MD5, SHA1, SHA256)</li>"
+            "<li>Crash report acquisition</li>"
+            "<li>Case management</li>"
             "<li>Forensic report generation</li>"
             "</ul>"
             "<p><small>Licensed under LGPL v2.1</small></p>"
         )
+    
+    def new_case(self):
+        """Create a new forensic case"""
+        dialog = CaseManagementDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.case:
+            self.current_case = dialog.case
+            self.log_message(f"New case created: {self.current_case.case_id}")
+            self.log_message(f"Case name: {self.current_case.case_name}")
+            self.log_message(f"Examiner: {self.current_case.examiner}")
+            self.log_message(f"Output directory: {self.current_case.output_directory}")
+            self.statusBar().showMessage(f"Case: {self.current_case.case_name}")
+            
+            # Update backup destination to case directory
+            case_dir = os.path.join(
+                self.current_case.output_directory, 
+                self.current_case.case_id,
+                "backups"
+            )
+            self.backup_dest.setText(case_dir)
+            self.backup_btn.setEnabled(self.current_device is not None)
+    
+    def pair_device(self):
+        """Pair with the selected device"""
+        if not self.current_device:
+            QMessageBox.warning(self, "Error", "No device selected")
+            return
+        
+        self.statusBar().showMessage("Pairing with device...")
+        success, message = CommandRunner.pair_device(self.current_device.udid)
+        
+        if success:
+            self.log_message(f"Device paired successfully: {self.current_device.name}")
+            QMessageBox.information(self, "Success", "Device paired successfully!")
+            self.refresh_devices()
+        else:
+            self.log_message(f"Pairing failed: {message}")
+            QMessageBox.warning(
+                self, 
+                "Pairing Failed", 
+                f"Failed to pair with device.\n\n{message}\n\n"
+                "Please unlock the device and tap 'Trust' when prompted."
+            )
+    
+    def get_crash_reports(self):
+        """Download crash reports from device"""
+        if not self.current_device:
+            QMessageBox.warning(self, "Error", "No device selected")
+            return
+        
+        # Determine output directory
+        if self.current_case:
+            output_dir = os.path.join(
+                self.current_case.output_directory,
+                self.current_case.case_id,
+                "crash_reports"
+            )
+        else:
+            output_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select directory for crash reports",
+                os.path.expanduser("~")
+            )
+        
+        if not output_dir:
+            return
+        
+        self.log_message(f"Downloading crash reports to: {output_dir}")
+        self.statusBar().showMessage("Downloading crash reports...")
+        
+        self.crash_thread = CrashReportThread(self.current_device.udid, output_dir)
+        self.crash_thread.progress.connect(lambda msg: self.log_message(msg))
+        self.crash_thread.finished.connect(self.on_crash_reports_finished)
+        self.crash_thread.start()
+    
+    def on_crash_reports_finished(self, success: bool, message: str):
+        """Handle crash report download completion"""
+        if success:
+            self.log_message(f"Crash reports downloaded successfully")
+            self.statusBar().showMessage("Crash reports downloaded")
+            QMessageBox.information(self, "Success", message)
+        else:
+            self.log_message(f"Failed to download crash reports: {message}")
+            self.statusBar().showMessage("Failed to download crash reports")
+            QMessageBox.warning(self, "Error", f"Failed to download crash reports:\n{message}")
+    
+    def restart_device(self):
+        """Restart the connected device"""
+        if not self.current_device:
+            QMessageBox.warning(self, "Error", "No device selected")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Confirm Restart",
+            f"Are you sure you want to restart {self.current_device.name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        success, message = CommandRunner.restart_device(self.current_device.udid)
+        
+        if success:
+            self.log_message(f"Device restart initiated: {self.current_device.name}")
+            QMessageBox.information(self, "Success", "Device restart initiated")
+        else:
+            self.log_message(f"Failed to restart device: {message}")
+            QMessageBox.warning(self, "Error", f"Failed to restart device:\n{message}")
+    
+    def show_tools_status(self):
+        """Show libimobiledevice tools status dialog"""
+        dialog = ToolsStatusDialog(self)
+        dialog.exec()
     
     @staticmethod
     def format_size(size: int) -> str:
@@ -1192,8 +1872,15 @@ class ForensicImagerWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close"""
+        # Stop device monitor
         self.device_monitor.stop()
         self.device_monitor.wait()
+        
+        # Stop syslog thread if running
+        if self.syslog_thread and self.syslog_thread.isRunning():
+            self.syslog_thread.stop()
+            self.syslog_thread.wait()
+        
         event.accept()
 
 

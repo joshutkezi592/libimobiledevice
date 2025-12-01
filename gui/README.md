@@ -8,6 +8,15 @@ A graphical user interface (GUI) tool for forensic imaging of Apple iOS devices.
   - Automatic detection of connected iOS devices
   - Real-time device connection monitoring
   - Detailed device information display (UDID, model, iOS version, serial number, etc.)
+  - Battery level and charging status display
+  - Device pairing status and pairing capability
+  - Device restart functionality
+
+- **Case Management**
+  - Create forensic cases with unique case IDs
+  - Track examiner information
+  - Automatic directory structure creation for organized evidence storage
+  - Case notes and documentation
 
 - **Filesystem Browser**
   - Browse device filesystem via AFC (Apple File Connection)
@@ -15,6 +24,11 @@ A graphical user interface (GUI) tool for forensic imaging of Apple iOS devices.
   - View file properties including size and type
   - Download files and directories from device
   - Context menu for quick actions
+
+- **Installed Apps**
+  - View list of all installed applications
+  - Display bundle IDs and version numbers
+  - Useful for app-specific data acquisition
 
 - **Forensic Imaging**
   - Full device backup using idevicebackup2
@@ -30,10 +44,19 @@ A graphical user interface (GUI) tool for forensic imaging of Apple iOS devices.
   - Save screenshots in PNG format
   - Useful for documenting device state
 
+- **Crash Reports**
+  - Download crash reports from device
+  - Automatic organization into case folders
+  - Useful for malware analysis and debugging
+
 - **Report Generation**
   - Export detailed forensic reports
   - Include device information, acquired files, and hash values
   - Timestamped acquisition logs
+
+- **Tools Status Check**
+  - Verify availability of libimobiledevice tools
+  - Installation guidance for missing tools
 
 ## Requirements
 
@@ -43,12 +66,18 @@ A graphical user interface (GUI) tool for forensic imaging of Apple iOS devices.
 - PyQt6
 
 ### libimobiledevice Requirements
-The following libimobiledevice tools must be installed and accessible in PATH:
+The following libimobiledevice tools should be installed for full functionality:
 - `idevice_id` - Device detection
 - `ideviceinfo` - Device information
+- `idevicepair` - Device pairing
 - `afcclient` - Filesystem access
 - `idevicebackup2` - Device backup
 - `idevicescreenshot` - Screenshot capture (requires developer disk image)
+- `ideviceinstaller` - App listing
+- `idevicecrashreport` - Crash report extraction
+- `idevicediagnostics` - Device diagnostics and control
+
+Use the "Check Tools" button in the application to verify which tools are available.
 
 ## Installation
 
@@ -95,12 +124,36 @@ python3 forensic_imager.py
 
 ## Usage Guide
 
+### Creating a New Case
+
+For proper forensic documentation, start by creating a case:
+
+1. Click "New Case" in the toolbar
+2. Enter case details (Case ID is auto-generated)
+3. Specify examiner name
+4. Select an output directory for case files
+5. Add any case notes
+6. Click OK to create the case
+
+The case will automatically organize all acquired evidence into subdirectories:
+- `backups/` - Device backups
+- `files/` - Downloaded files
+- `screenshots/` - Captured screenshots
+- `crash_reports/` - Crash report logs
+- `reports/` - Exported forensic reports
+- `logs/` - System logs
+
 ### Connecting a Device
 
 1. Connect your iOS device via USB
 2. Trust the computer on the device if prompted
 3. The device should appear automatically in the "Connected Devices" dropdown
 4. Select your device to begin working with it
+5. If not paired, click "Pair Device" and accept on the device
+
+### Checking Tool Availability
+
+Click "Check Tools" to verify which libimobiledevice tools are installed. Missing tools will limit certain functionality.
 
 ### Browsing the Filesystem
 
