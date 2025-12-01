@@ -97,9 +97,15 @@ class CommandRunner:
     _tool_cache: Dict[str, bool] = {}
     
     @staticmethod
-    def check_tool_available(tool_name: str) -> bool:
+    def clear_tool_cache():
+        """Clear the tool availability cache"""
+        CommandRunner._tool_cache.clear()
+        logging.debug("Tool cache cleared")
+    
+    @staticmethod
+    def check_tool_available(tool_name: str, use_cache: bool = True) -> bool:
         """Check if a libimobiledevice tool is available"""
-        if tool_name in CommandRunner._tool_cache:
+        if use_cache and tool_name in CommandRunner._tool_cache:
             return CommandRunner._tool_cache[tool_name]
         
         # Use shutil.which for cross-platform compatibility
@@ -111,6 +117,8 @@ class CommandRunner:
     @staticmethod
     def get_available_tools() -> Dict[str, bool]:
         """Get dictionary of available libimobiledevice tools"""
+        # Clear cache to get fresh results
+        CommandRunner.clear_tool_cache()
         tools = [
             "idevice_id", "ideviceinfo", "idevicepair", "idevicename",
             "idevicebackup2", "idevicescreenshot", "idevicesyslog",
@@ -331,8 +339,16 @@ class CommandRunner:
             ["idevicepair", "-u", udid, "validate"]
         )
         
-        if ret == 0:
+        # Check both return code and output text for reliability
+        # idevicepair returns 0 on success and outputs "SUCCESS: ..."
+        output = ((stdout or "") + (stderr or "")).lower()
+        if ret == 0 or "success" in output:
             return True, "Device is paired"
+        
+        # Some versions may output the pairing status differently
+        if "validated" in output or "paired" in output:
+            return True, "Device is paired"
+            
         return False, stderr or stdout or "Device is not paired"
     
     @staticmethod
@@ -380,13 +396,31 @@ class CommandRunner:
             timeout=60
         )
         
-        if ret == 0:
-            for line in stdout.split('\n'):
-                line = line.strip()
-                if not line or line.startswith('CFBundleIdentifier') or line.startswith('Total:'):
-                    continue
-                
-                # Parse app info: bundle_id, version, name
+        logging.debug(f"ideviceinstaller return code: {ret}")
+        logging.debug(f"ideviceinstaller stdout: {stdout[:500] if stdout else 'empty'}")
+        logging.debug(f"ideviceinstaller stderr: {stderr[:500] if stderr else 'empty'}")
+        
+        if ret != 0:
+            logging.error(f"ideviceinstaller failed: {stderr or stdout}")
+            return apps
+        
+        for line in stdout.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Skip header and footer lines
+            if line.startswith('CFBundleIdentifier') or line.startswith('Total:'):
+                logging.debug(f"Skipping header/footer line: {line}")
+                continue
+            
+            # Try parsing different formats:
+            # Format 1: "com.example.app, 1.0, App Name"
+            # Format 2: "com.example.app - App Name 1.0"
+            # Format 3: Just bundle ID "com.example.app"
+            
+            if ',' in line:
+                # Comma-separated format
                 parts = line.split(',')
                 if len(parts) >= 1:
                     bundle_id = parts[0].strip()
@@ -398,7 +432,29 @@ class CommandRunner:
                         'version': version,
                         'name': name
                     })
+            elif ' - ' in line:
+                # Dash-separated format
+                parts = line.split(' - ', 1)
+                bundle_id = parts[0].strip()
+                name = parts[1].strip() if len(parts) > 1 else bundle_id
+                
+                apps.append({
+                    'bundle_id': bundle_id,
+                    'version': '',
+                    'name': name
+                })
+            elif '.' in line and not line.startswith('.'):
+                # Likely just a bundle ID (e.g., com.example.app)
+                bundle_id = line.strip()
+                apps.append({
+                    'bundle_id': bundle_id,
+                    'version': '',
+                    'name': bundle_id
+                })
+            else:
+                logging.debug(f"Skipping unrecognized line format: {line}")
         
+        logging.info(f"Found {len(apps)} installed apps")
         return apps
     
     @staticmethod
@@ -1350,7 +1406,29 @@ class ForensicImagerWindow(QMainWindow):
         self.statusBar().showMessage("Loading installed apps...")
         self.apps_table.setRowCount(0)
         
+        # Clear cache to detect newly installed tools
+        CommandRunner.clear_tool_cache()
+        
+        # Check if ideviceinstaller is available
+        if not CommandRunner.check_tool_available("ideviceinstaller"):
+            self.statusBar().showMessage("ideviceinstaller not available")
+            self.log_message("ideviceinstaller not found. Install it to view installed apps.")
+            QMessageBox.warning(
+                self,
+                "Tool Not Found",
+                "ideviceinstaller is not installed or not in PATH.\n\n"
+                "Install it using:\n"
+                "  Linux: sudo apt install ideviceinstaller\n"
+                "  macOS: brew install ideviceinstaller"
+            )
+            return
+        
         apps = CommandRunner.get_installed_apps(self.current_device.udid)
+        
+        if not apps:
+            self.statusBar().showMessage("No apps found or failed to retrieve apps")
+            self.log_message("No apps found. The device may need to be unlocked or trusted.")
+            return
         
         self.apps_table.setRowCount(len(apps))
         for i, app in enumerate(apps):
