@@ -210,21 +210,36 @@ class CommandRunner:
         
         ret, stdout, stderr = CommandRunner.run_command(cmd, timeout=60)
         
+        logging.debug(f"afcclient ls return code: {ret}")
+        logging.debug(f"afcclient ls stdout: {stdout[:500] if stdout else 'empty'}")
+        logging.debug(f"afcclient ls stderr: {stderr[:500] if stderr else 'empty'}")
+        
         if ret != 0:
+            logging.error(f"afcclient ls failed: {stderr or stdout}")
             return files
         
         for line in stdout.strip().split('\n'):
             if not line.strip():
                 continue
             
+            # Skip error messages or prompts
+            if line.startswith('Error:') or line.startswith('afc:'):
+                continue
+            
             parts = line.split()
-            if len(parts) >= 7:
+            # Format: drwxr-xr-x    4 mobile mobile          0 01 Dec 2025 12:34:56 Podcasts
+            # Index:     0         1    2      3             4  5   6    7        8    9+
+            if len(parts) >= 9:
                 # Parse ls -l output
                 perms = parts[0]
-                size = int(parts[4]) if parts[4].isdigit() else 0
-                name = ' '.join(parts[6:])  # Handle filenames with spaces
+                try:
+                    size = int(parts[4])
+                except (ValueError, IndexError):
+                    size = 0
+                # Name starts at index 9 (after date/time)
+                name = ' '.join(parts[9:])  # Handle filenames with spaces
                 
-                if name in ['.', '..']:
+                if not name or name in ['.', '..']:
                     continue
                 
                 is_dir = perms.startswith('d')
@@ -237,7 +252,20 @@ class CommandRunner:
                     is_dir=is_dir,
                     file_type="directory" if is_dir else "file"
                 ))
+            elif len(parts) >= 1 and not parts[0].startswith('-') and not parts[0].startswith('d'):
+                # Simple format without -l (just file/folder names)
+                name = ' '.join(parts)
+                if name and name not in ['.', '..']:
+                    file_path = f"{path}/{name}" if path != "/" else f"/{name}"
+                    files.append(FileInfo(
+                        name=name,
+                        path=file_path,
+                        size=0,
+                        is_dir=False,  # Unknown, will show as file
+                        file_type="unknown"
+                    ))
         
+        logging.info(f"Parsed {len(files)} files from afcclient output")
         return files
     
     @staticmethod
@@ -1821,12 +1849,31 @@ class ForensicImagerWindow(QMainWindow):
                 pass
         else:
             self.statusBar().showMessage(f"Screenshot failed: {result}")
-            QMessageBox.warning(
-                self, 
-                "Error", 
-                f"Failed to capture screenshot.\n\n{result}\n\n"
-                "Note: Screenshot requires a mounted developer disk image."
-            )
+            self.log_message(f"Screenshot failed: {result}")
+            
+            # Check if developer image is mounted for better error message
+            mounted, _ = CommandRunner.check_developer_image_mounted(self.current_device.udid)
+            
+            if mounted:
+                # Developer image is mounted but screenshot still failed
+                QMessageBox.warning(
+                    self, 
+                    "Error", 
+                    f"Failed to capture screenshot.\n\n{result}\n\n"
+                    "The developer disk image appears to be mounted.\n"
+                    "Possible causes:\n"
+                    "- Device screen is locked\n"
+                    "- Device needs to be unlocked and trusted\n"
+                    "- Try disconnecting and reconnecting the device"
+                )
+            else:
+                QMessageBox.warning(
+                    self, 
+                    "Error", 
+                    f"Failed to capture screenshot.\n\n{result}\n\n"
+                    "A developer disk image needs to be mounted.\n"
+                    "Use 'Mount Dev Image' button to mount it."
+                )
     
     def save_screenshot(self):
         """Save captured screenshot"""
