@@ -203,10 +203,12 @@ class CommandRunner:
         """List directory contents using afcclient"""
         files = []
         
+        # afcclient command-line mode: afcclient -u UDID ls /path
+        # Note: ls command doesn't support -l flag in afcclient
         cmd = ["afcclient", "-u", udid]
         if app_id:
             cmd.extend(["--documents", app_id])
-        cmd.extend(["ls", "-l", path])
+        cmd.extend(["ls", path])
         
         ret, stdout, stderr = CommandRunner.run_command(cmd, timeout=60)
         
@@ -226,24 +228,33 @@ class CommandRunner:
             if line.startswith('Error:') or line.startswith('afc:'):
                 continue
             
-            parts = line.split()
-            # Format: drwxr-xr-x    4 mobile mobile          0 01 Dec 2025 12:34:56 Podcasts
-            # Index:     0         1    2      3             4  5   6    7        8    9+
-            if len(parts) >= 9:
-                # Parse ls -l output
-                perms = parts[0]
-                try:
-                    size = int(parts[4])
-                except (ValueError, IndexError):
-                    size = 0
-                # Name starts at index 9 (after date/time)
-                name = ' '.join(parts[9:])  # Handle filenames with spaces
-                
-                if not name or name in ['.', '..']:
-                    continue
-                
-                is_dir = perms.startswith('d')
+            # Simple format: just file/folder names, one per line
+            name = line.strip()
+            if name and name not in ['.', '..']:
                 file_path = f"{path}/{name}" if path != "/" else f"/{name}"
+                
+                # Try to get file info to determine if it's a directory
+                is_dir = False
+                size = 0
+                
+                # Check if it's a directory by trying to get its info
+                info_cmd = ["afcclient", "-u", udid]
+                if app_id:
+                    info_cmd.extend(["--documents", app_id])
+                info_cmd.extend(["info", file_path])
+                
+                info_ret, info_stdout, _ = CommandRunner.run_command(info_cmd, timeout=10)
+                if info_ret == 0 and info_stdout:
+                    for info_line in info_stdout.split('\n'):
+                        if 'st_ifmt:' in info_line.lower() or 'ifmt' in info_line.lower():
+                            if 'S_IFDIR' in info_line:
+                                is_dir = True
+                        elif 'st_size:' in info_line.lower():
+                            try:
+                                size_str = info_line.split(':')[-1].strip()
+                                size = int(size_str)
+                            except (ValueError, IndexError):
+                                pass
                 
                 files.append(FileInfo(
                     name=name,
@@ -252,18 +263,6 @@ class CommandRunner:
                     is_dir=is_dir,
                     file_type="directory" if is_dir else "file"
                 ))
-            elif len(parts) >= 1 and not parts[0].startswith('-') and not parts[0].startswith('d'):
-                # Simple format without -l (just file/folder names)
-                name = ' '.join(parts)
-                if name and name not in ['.', '..']:
-                    file_path = f"{path}/{name}" if path != "/" else f"/{name}"
-                    files.append(FileInfo(
-                        name=name,
-                        path=file_path,
-                        size=0,
-                        is_dir=False,  # Unknown, will show as file
-                        file_type="unknown"
-                    ))
         
         logging.info(f"Parsed {len(files)} files from afcclient output")
         return files
@@ -353,9 +352,19 @@ class CommandRunner:
         cmd = ["idevicescreenshot", "-u", udid, output_path]
         ret, stdout, stderr = CommandRunner.run_command(cmd, timeout=30)
         
+        logging.debug(f"idevicescreenshot return code: {ret}")
+        logging.debug(f"idevicescreenshot stdout: {stdout}")
+        logging.debug(f"idevicescreenshot stderr: {stderr}")
+        
         if ret == 0:
-            return True, output_path
-        return False, stderr or "Failed to take screenshot"
+            # Verify the file was created
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True, output_path
+            return False, "Screenshot file was not created or is empty"
+        
+        # Provide more specific error message
+        error_msg = stderr or stdout or "Failed to take screenshot"
+        return False, error_msg
     
     @staticmethod
     def check_pairing_status(udid: str) -> Tuple[bool, str]:
