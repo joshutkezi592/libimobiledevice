@@ -42,3 +42,16 @@ tools/afcclient
 cython/.libs/*
 cython/*.c
 doxygen.cfg
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# GUI temporary files
+/tmp/idevice_screenshots/

@@ -123,6 +123,18 @@ Documentation about using the library in your application is not available yet.
 The "hacker way" for now is to look at the implementation of the included
 utilities.
 
+### GUI Application
+
+A modern PyQt6-based GUI application is available for managing iOS devices:
+
+```bash
+cd gui
+pip install -r requirements.txt
+python3 idevice_manager.py
+```
+
+See [gui/README.md](gui/README.md) for detailed information about the GUI application.
+
 ### Utilities
 
 The library bundles the following command-line utilities in the tools directory:
