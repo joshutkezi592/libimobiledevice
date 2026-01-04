@@ -32,6 +32,13 @@ See the main [README.md](../README.md) for detailed build instructions.
 
 ### 2. Install Python dependencies
 
+**Quick install (recommended):**
+```bash
+cd gui
+./install.sh
+```
+
+**Manual install:**
 ```bash
 cd gui
 pip install -r requirements.txt
