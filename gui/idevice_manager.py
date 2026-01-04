@@ -6,6 +6,8 @@ iDevice Manager - A PyQt6 GUI for libimobiledevice
 import sys
 import subprocess
 import os
+import shutil
+import tempfile
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QListWidget, QTextEdit, QTabWidget,
@@ -101,7 +103,7 @@ class SyslogWorker(QThread):
             self.process.terminate()
             try:
                 self.process.wait(timeout=2)
-            except:
+            except subprocess.TimeoutExpired:
                 self.process.kill()
 
 
@@ -536,7 +538,7 @@ class iDeviceManagerGUI(QMainWindow):
             self.statusBar.showMessage("Taking screenshot...")
             
             # Create temp directory if it doesn't exist
-            temp_dir = "/tmp/idevice_screenshots"
+            temp_dir = os.path.join(tempfile.gettempdir(), "idevice_screenshots")
             os.makedirs(temp_dir, exist_ok=True)
             
             screenshot_path = f"{temp_dir}/screenshot_{self.current_device}.png"
@@ -584,7 +586,6 @@ class iDeviceManagerGUI(QMainWindow):
         
         if file_path:
             try:
-                import shutil
                 shutil.copy(self.current_screenshot, file_path)
                 self.statusBar.showMessage(f"Screenshot saved to {file_path}", 3000)
             except Exception as e:
