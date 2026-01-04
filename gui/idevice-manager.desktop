@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=iDevice Manager
+Comment=GUI for managing iOS devices using libimobiledevice
+Exec=/usr/bin/python3 /home/runner/work/libimobiledevice/libimobiledevice/gui/idevice_manager.py
+Icon=phone
+Terminal=false
+Categories=Utility;System;
+Keywords=iOS;iPhone;iPad;device;manager;libimobiledevice;
