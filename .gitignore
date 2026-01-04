@@ -42,3 +42,8 @@ tools/afcclient
 cython/.libs/*
 cython/*.c
 doxygen.cfg
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
