@@ -1,8 +1,10 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --color-cyan-glow: #00d4ff;
+  --color-blue-glow: #0066ff;
 }
 
 * {
@@ -16,8 +18,8 @@ html {
 body {
   background: #000;
   color: #fff;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
 }
 
 /* Custom scrollbar */
@@ -28,15 +30,184 @@ body {
   background: #000;
 }
 ::-webkit-scrollbar-thumb {
-  background: #333;
+  background: #222;
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: #444;
 }
 
-/* Select option styling */
 select option {
   background: #111;
   color: #fff;
+}
+
+/* ── Particles ── */
+.particle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  background: rgba(0, 212, 255, 0.5);
+  border-radius: 50%;
+  animation: float-particle linear infinite;
+}
+
+@keyframes float-particle {
+  0% {
+    transform: translateY(0) translateX(0);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-100vh) translateX(40px);
+    opacity: 0;
+  }
+}
+
+/* ── Glow text ── */
+.text-glow {
+  text-shadow: 0 0 20px rgba(0, 212, 255, 0.5), 0 0 60px rgba(0, 212, 255, 0.2);
+}
+
+.text-glow-sm {
+  text-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+}
+
+/* ── Gradient animation ── */
+@keyframes gradient-shift {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient-shift 4s ease infinite;
+}
+
+/* ── Pulse ring ── */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 2s ease-out infinite;
+}
+
+/* ── Horizontal line glow ── */
+.line-glow {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 212, 255, 0.4),
+    transparent
+  );
+}
+
+/* ── Section divider ── */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 212, 255, 0.15) 20%,
+    rgba(0, 212, 255, 0.3) 50%,
+    rgba(0, 212, 255, 0.15) 80%,
+    transparent 100%
+  );
+}
+
+/* ── Glass card ── */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.glass-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(0, 212, 255, 0.2);
+}
+
+/* ── 3D Perspective ── */
+.perspective-container {
+  perspective: 1200px;
+  perspective-origin: center;
+}
+
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+
+/* ── 3D Card tilt ── */
+.card-3d {
+  transform-style: preserve-3d;
+  transition: transform 0.5s ease;
+}
+
+.card-3d:hover {
+  transform: rotateY(-5deg) rotateX(3deg) scale(1.02);
+}
+
+.card-3d-content {
+  transform: translateZ(30px);
+}
+
+/* ── Artist image parallax ── */
+.artist-bg {
+  position: absolute;
+  inset: -80px;
+  background-size: cover;
+  background-position: center top;
+  will-change: transform;
+}
+
+/* ── 3D floating ── */
+@keyframes float-3d {
+  0%, 100% {
+    transform: translateY(0px) rotateX(0deg) rotateY(0deg);
+  }
+  25% {
+    transform: translateY(-10px) rotateX(2deg) rotateY(-2deg);
+  }
+  50% {
+    transform: translateY(-5px) rotateX(-1deg) rotateY(2deg);
+  }
+  75% {
+    transform: translateY(-12px) rotateX(1deg) rotateY(-1deg);
+  }
+}
+
+.animate-float-3d {
+  animation: float-3d 6s ease-in-out infinite;
+}
+
+/* ── Depth shadow ── */
+.depth-shadow {
+  box-shadow:
+    0 25px 50px -12px rgba(0, 0, 0, 0.8),
+    0 0 60px -15px rgba(0, 212, 255, 0.15);
+}
+
+.depth-shadow:hover {
+  box-shadow:
+    0 35px 60px -15px rgba(0, 0, 0, 0.9),
+    0 0 80px -10px rgba(0, 212, 255, 0.25);
 }
